@@ -1,14 +1,6 @@
-const CACHE_NAME = 'rick-peruse-v1';
+const CACHE_NAME = 'rick-peruse-v2';
 
-const PRECACHE_URLS = [
-  '/',
-  '/reader',
-];
-
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS))
-  );
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
@@ -26,32 +18,20 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
 
-  // Skip non-GET requests
+  // Only handle GET requests
   if (request.method !== 'GET') return;
 
-  // Network-first for navigation and API requests
-  if (request.mode === 'navigate' || request.url.includes('/_next/')) {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
+  // Always go network-first — only use cache as offline fallback
+  event.respondWith(
+    fetch(request)
+      .then((response) => {
+        // Cache successful responses for offline use
+        if (response.ok) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-          return response;
-        })
-        .catch(() => caches.match(request))
-    );
-    return;
-  }
-
-  // Cache-first for static assets
-  event.respondWith(
-    caches.match(request).then((cached) => {
-      if (cached) return cached;
-      return fetch(request).then((response) => {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+        }
         return response;
-      });
-    })
+      })
+      .catch(() => caches.match(request))
   );
 });
