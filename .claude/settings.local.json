@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep -l \"Button\\\\|button\")",
+      "Bash(xargs grep -l \"bottom.*left\\\\|left.*bottom\")",
+      "Bash(npx next build)",
+      "Bash(convert --version)",
+      "Bash(node -e \":*)",
+      "Bash(npx --yes sharp-cli --version)",
+      "Bash(npx sharp-cli -i public/icon-192.svg -o public/icon-192.png resize 192 192)",
+      "Bash(npx sharp-cli -i public/icon-512.svg -o public/icon-512.png resize 512 512)"
+    ]
+  }
+}
