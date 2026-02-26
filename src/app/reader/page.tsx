@@ -19,7 +19,6 @@ import { useReadingProgress } from '@/hooks/useReadingProgress';
 import { useTextSelection } from '@/hooks/useTextSelection';
 import type { Highlight } from '@/types/annotation';
 import {
-  Menu,
   X,
   Type,
   Palette,
@@ -57,6 +56,12 @@ export default function ReaderPage() {
       loadAnnotations(documentId);
     }
   }, [documentId, loadAnnotations]);
+
+  const handleReadFromHere = useCallback(() => {
+    if (!selectionRange) return;
+    tts.play(selectionRange.startBlockIndex);
+    clearSelection();
+  }, [selectionRange, tts, clearSelection]);
 
   const handleHighlightColor = useCallback(
     (color: string) => {
@@ -163,7 +168,7 @@ export default function ReaderPage() {
 
   return (
     <div
-      className="min-h-screen"
+      className="min-h-screen overflow-x-hidden"
       style={{
         background: theme.colors.background,
         color: theme.colors.text,
@@ -176,77 +181,74 @@ export default function ReaderPage() {
     >
       <ReadingProgress />
 
-      {/* Top Toolbar */}
+      {/* Top Bar — back button + filename only */}
       <div
-        className={`fixed top-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 transition-opacity duration-300 ${
+        className={`fixed top-0 left-0 right-0 z-40 flex items-center px-4 py-2 transition-opacity duration-300 ${
           controlsVisible && !focusMode ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         style={{ background: `${theme.colors.surface}ee` }}
       >
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => router.push('/')}
-            className="rounded p-2 hover:bg-white/10 transition-colors"
-            aria-label="Back to home"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </button>
-          <span className="text-sm font-medium truncate max-w-[200px] sm:max-w-xs opacity-70">
-            {fileName || pdfDoc.title}
-          </span>
-        </div>
+        <button
+          onClick={() => router.push('/')}
+          className="rounded p-2 hover:bg-white/10 transition-colors shrink-0"
+          aria-label="Back to home"
+        >
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+        <span className="text-sm font-medium truncate opacity-70 ml-1">
+          {fileName || pdfDoc.title}
+        </span>
+      </div>
 
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => togglePanel('typography')}
-            className={`rounded p-2 transition-colors ${activePanel === 'typography' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
-            aria-label="Typography settings"
-            title="Typography (T)"
-          >
-            <Type className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => togglePanel('theme')}
-            className={`rounded p-2 transition-colors ${activePanel === 'theme' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
-            aria-label="Theme settings"
-            title="Theme (C)"
-          >
-            <Palette className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => togglePanel('tts')}
-            className={`rounded p-2 transition-colors ${activePanel === 'tts' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
-            aria-label="Text-to-Speech"
-            title="Text-to-Speech (Space)"
-          >
-            <Volume2 className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => togglePanel('ambient')}
-            className={`rounded p-2 transition-colors ${activePanel === 'ambient' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
-            aria-label="Ambient audio"
-          >
-            <Headphones className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => togglePanel('bookmarks')}
-            className={`rounded p-2 transition-colors ${activePanel === 'bookmarks' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
-            aria-label="Bookmarks"
-          >
-            <BookmarkPlus className="h-4 w-4" />
-          </button>
-
-          <div className="w-px h-5 bg-current/10 mx-1" />
-
-          <button
-            onClick={() => setFocusMode((m) => !m)}
-            className="rounded p-2 hover:bg-white/10 transition-colors"
-            aria-label={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
-            title="Focus mode (F)"
-          >
-            {focusMode ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
-          </button>
-        </div>
+      {/* Bottom Toolbar — control buttons */}
+      <div
+        className={`fixed bottom-0 left-0 right-0 z-40 flex items-center justify-around px-2 py-2 transition-opacity duration-300 ${
+          controlsVisible && !focusMode ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        }`}
+        style={{ background: `${theme.colors.surface}ee` }}
+      >
+        <button
+          onClick={() => togglePanel('typography')}
+          className={`rounded p-2.5 transition-colors ${activePanel === 'typography' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
+          aria-label="Typography settings"
+        >
+          <Type className="h-5 w-5" />
+        </button>
+        <button
+          onClick={() => togglePanel('theme')}
+          className={`rounded p-2.5 transition-colors ${activePanel === 'theme' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
+          aria-label="Theme settings"
+        >
+          <Palette className="h-5 w-5" />
+        </button>
+        <button
+          onClick={() => togglePanel('tts')}
+          className={`rounded p-2.5 transition-colors ${activePanel === 'tts' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
+          aria-label="Text-to-Speech"
+        >
+          <Volume2 className="h-5 w-5" />
+        </button>
+        <button
+          onClick={() => togglePanel('ambient')}
+          className={`rounded p-2.5 transition-colors ${activePanel === 'ambient' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
+          aria-label="Ambient audio"
+        >
+          <Headphones className="h-5 w-5" />
+        </button>
+        <button
+          onClick={() => togglePanel('bookmarks')}
+          className={`rounded p-2.5 transition-colors ${activePanel === 'bookmarks' ? 'bg-[var(--reader-accent)]/20' : 'hover:bg-white/10'}`}
+          aria-label="Bookmarks"
+        >
+          <BookmarkPlus className="h-5 w-5" />
+        </button>
+        <button
+          onClick={() => setFocusMode((m) => !m)}
+          className="rounded p-2.5 hover:bg-white/10 transition-colors"
+          aria-label={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
+        >
+          {focusMode ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
+        </button>
       </div>
 
       {/* Sidebar */}
@@ -254,13 +256,13 @@ export default function ReaderPage() {
         <>
           {/* Backdrop */}
           <div
-            className="fixed inset-0 z-40 bg-black/40 sm:hidden"
+            className="fixed inset-0 z-40 bg-black/40"
             onClick={() => setSidebarOpen(false)}
           />
 
           {/* Panel */}
           <aside
-            className="fixed top-0 right-0 z-50 flex h-full w-72 flex-col overflow-y-auto border-l border-white/10 p-4 pt-14"
+            className="fixed top-0 right-0 z-50 flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-l border-white/10 p-4 pt-14"
             style={{ background: `${theme.colors.surface}f0` }}
             role="complementary"
             aria-label="Settings panel"
@@ -302,7 +304,7 @@ export default function ReaderPage() {
       )}
 
       {/* Main Content */}
-      <div className={`pt-12 pb-24 ${sidebarOpen && !focusMode ? 'sm:pr-72' : ''} transition-[padding] duration-200`}>
+      <div className={`pt-12 pb-20 ${sidebarOpen && !focusMode ? 'sm:pr-72' : ''} transition-[padding] duration-200`}>
         <ReflowedContent blocks={reflowedBlocks} />
       </div>
 
@@ -315,6 +317,7 @@ export default function ReaderPage() {
             y: selectionRange.rect.top,
           }}
           onSelectColor={handleHighlightColor}
+          onReadFromHere={handleReadFromHere}
           onDismiss={clearSelection}
         />
       )}

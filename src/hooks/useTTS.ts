@@ -92,8 +92,10 @@ export function useTTS(blocks: ReflowedBlock[]) {
       };
 
       utterance.onerror = (event) => {
-        if (event.error !== 'canceled') {
-          console.error('TTS error:', event.error);
+        // Ignore benign errors from cancel/interrupt during normal playback
+        const benign = ['canceled', 'interrupted'];
+        if (!benign.includes(event.error)) {
+          console.warn('TTS error:', event.error);
         }
       };
 
