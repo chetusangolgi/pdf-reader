@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useReaderStore } from '@/stores/readerStore';
 import { useThemeStore } from '@/stores/themeStore';
@@ -28,6 +28,7 @@ import {
   Maximize,
   Minimize,
   ArrowLeft,
+  RotateCw,
 } from 'lucide-react';
 
 type PanelId = 'typography' | 'theme' | 'tts' | 'ambient' | 'bookmarks' | null;
@@ -40,7 +41,6 @@ export default function ReaderPage() {
   const [activePanel, setActivePanel] = useState<PanelId>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
-  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const tts = useTTS(reflowedBlocks);
   const documentId = useReaderStore((s) => s.documentId);
@@ -91,31 +91,26 @@ export default function ReaderPage() {
     }
   }, [pdfDoc, reflowedBlocks, router]);
 
-  // Auto-hide controls
+  // Hide controls when entering focus mode
   useEffect(() => {
-    if (focusMode) {
-      setControlsVisible(false);
-      return;
-    }
-
-    const resetTimer = () => {
-      setControlsVisible(true);
-      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-      idleTimerRef.current = setTimeout(() => setControlsVisible(false), 4000);
-    };
-
-    window.addEventListener('mousemove', resetTimer);
-    window.addEventListener('touchstart', resetTimer);
-    window.addEventListener('keydown', resetTimer);
-    resetTimer();
-
-    return () => {
-      window.removeEventListener('mousemove', resetTimer);
-      window.removeEventListener('touchstart', resetTimer);
-      window.removeEventListener('keydown', resetTimer);
-      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-    };
+    if (focusMode) setControlsVisible(false);
   }, [focusMode]);
+
+  // Rotate screen orientation
+  const handleRotate = useCallback(async () => {
+    try {
+      const orientation = screen.orientation as ScreenOrientation & {
+        lock(orientation: string): Promise<void>;
+      };
+      if (orientation.type.startsWith('portrait')) {
+        await orientation.lock('landscape');
+      } else {
+        await orientation.lock('portrait');
+      }
+    } catch {
+      // Screen Orientation API not supported or permission denied
+    }
+  }, []);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -187,6 +182,7 @@ export default function ReaderPage() {
           controlsVisible && !focusMode ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         style={{ background: `${theme.colors.surface}ee` }}
+        onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={() => router.push('/')}
@@ -206,6 +202,7 @@ export default function ReaderPage() {
           controlsVisible && !focusMode ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         style={{ background: `${theme.colors.surface}ee` }}
+        onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={() => togglePanel('typography')}
@@ -241,6 +238,13 @@ export default function ReaderPage() {
           aria-label="Bookmarks"
         >
           <BookmarkPlus className="h-5 w-5" />
+        </button>
+        <button
+          onClick={handleRotate}
+          className="rounded p-2.5 hover:bg-white/10 transition-colors"
+          aria-label="Rotate screen"
+        >
+          <RotateCw className="h-5 w-5" />
         </button>
         <button
           onClick={() => setFocusMode((m) => !m)}
@@ -303,8 +307,11 @@ export default function ReaderPage() {
         </button>
       )}
 
-      {/* Main Content */}
-      <div className={`pt-12 pb-20 ${sidebarOpen && !focusMode ? 'sm:pr-72' : ''} transition-[padding] duration-200`}>
+      {/* Main Content — tap to toggle controls */}
+      <div
+        className={`pt-12 pb-20 ${sidebarOpen && !focusMode ? 'sm:pr-72' : ''} transition-[padding] duration-200`}
+        onClick={() => { if (!focusMode) setControlsVisible((v) => !v); }}
+      >
         <ReflowedContent blocks={reflowedBlocks} />
       </div>
 
