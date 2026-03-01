@@ -1,4 +1,4 @@
-const CACHE_NAME = 'rick-peruse-v2';
+const CACHE_NAME = 'rick-peruse-v3';
 
 self.addEventListener('install', () => {
   self.skipWaiting();

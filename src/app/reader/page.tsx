@@ -96,19 +96,23 @@ export default function ReaderPage() {
     if (focusMode) setControlsVisible(false);
   }, [focusMode]);
 
-  // Rotate screen orientation
+  // Rotate screen orientation (requires fullscreen on mobile browsers)
   const handleRotate = useCallback(async () => {
     try {
+      // Fullscreen is required for orientation.lock() on mobile browsers
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      }
       const orientation = screen.orientation as ScreenOrientation & {
         lock(orientation: string): Promise<void>;
       };
-      if (orientation.type.startsWith('portrait')) {
-        await orientation.lock('landscape');
-      } else {
-        await orientation.lock('portrait');
-      }
+      const target = orientation.type.startsWith('portrait') ? 'landscape' : 'portrait';
+      await orientation.lock(target);
     } catch {
-      // Screen Orientation API not supported or permission denied
+      // Fallback: if fullscreen/lock not supported, exit fullscreen if we entered it
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
     }
   }, []);
 
