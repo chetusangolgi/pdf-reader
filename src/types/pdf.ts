@@ -13,9 +13,10 @@ export interface PdfTextItem {
 
 export interface PdfStructuredBlock {
   id: string;
-  type: 'heading' | 'paragraph' | 'list-item' | 'table' | 'image-placeholder';
+  type: 'heading' | 'paragraph' | 'list-item' | 'table' | 'image';
   level?: number; // For headings: 1-6
   content: string;
+  imageDataUrl?: string;
   isBold: boolean;
   isItalic: boolean;
   fontSize: number;

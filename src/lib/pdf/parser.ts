@@ -10,6 +10,189 @@ async function getPdfjs() {
   return pdfjsLib;
 }
 
+// --- Image extraction helpers ---
+
+const MAX_IMAGE_DIM = 1200;
+
+function concatMatrix(a: number[], b: number[]): number[] {
+  return [
+    a[0] * b[0] + a[1] * b[2],
+    a[0] * b[1] + a[1] * b[3],
+    a[2] * b[0] + a[3] * b[2],
+    a[2] * b[1] + a[3] * b[3],
+    a[4] * b[0] + a[5] * b[2] + b[4],
+    a[4] * b[1] + a[5] * b[3] + b[5],
+  ];
+}
+
+function getPageImage(page: { objs: { get(name: string, cb: (data: unknown) => void): void } }, name: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Timeout')), 5000);
+    try {
+      page.objs.get(name, (data: unknown) => {
+        clearTimeout(timer);
+        resolve(data);
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      reject(e);
+    }
+  });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function renderImageToDataUrl(imgData: any): string | null {
+  if (!imgData) return null;
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  // Handle ImageBitmap
+  if (typeof ImageBitmap !== 'undefined' && imgData instanceof ImageBitmap) {
+    let w = imgData.width;
+    let h = imgData.height;
+    if (w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) {
+      const scale = MAX_IMAGE_DIM / Math.max(w, h);
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+    }
+    canvas.width = w;
+    canvas.height = h;
+    ctx.drawImage(imgData, 0, 0, w, h);
+    return canvas.toDataURL('image/png');
+  }
+
+  // Handle raw pixel data { width, height, data, kind }
+  if (imgData.width && imgData.height && imgData.data) {
+    let w = imgData.width as number;
+    let h = imgData.height as number;
+    const kind = imgData.kind as number;
+
+    // kind 1 = GRAYSCALE_1BPP (usually masks), skip
+    if (kind === 1) return null;
+
+    canvas.width = w;
+    canvas.height = h;
+    const imageData = ctx.createImageData(w, h);
+    const src = imgData.data as Uint8ClampedArray;
+    const dst = imageData.data;
+
+    if (kind === 3) {
+      // RGBA_32BPP
+      dst.set(src);
+    } else if (kind === 2) {
+      // RGB_24BPP — add alpha channel
+      let s = 0, d = 0;
+      const pixelCount = w * h;
+      for (let p = 0; p < pixelCount; p++) {
+        dst[d++] = src[s++];
+        dst[d++] = src[s++];
+        dst[d++] = src[s++];
+        dst[d++] = 255;
+      }
+    } else {
+      return null;
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+
+    // Downscale if too large
+    if (w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) {
+      const scale = MAX_IMAGE_DIM / Math.max(w, h);
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+      const scaled = document.createElement('canvas');
+      scaled.width = w;
+      scaled.height = h;
+      const sctx = scaled.getContext('2d')!;
+      sctx.drawImage(canvas, 0, 0, w, h);
+      return scaled.toDataURL('image/png');
+    }
+
+    return canvas.toDataURL('image/png');
+  }
+
+  return null;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function extractPageImages(page: any, pdfjsLib: any, pageIndex: number): Promise<PdfStructuredBlock[]> {
+  const ops = await page.getOperatorList();
+  const OPS = pdfjsLib.OPS;
+  const images: PdfStructuredBlock[] = [];
+  const seenNames = new Set<string>();
+
+  const ctmStack: number[][] = [];
+  let ctm = [1, 0, 0, 1, 0, 0];
+
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i];
+    const args = ops.argsArray[i];
+
+    if (fn === OPS.save) {
+      ctmStack.push([...ctm]);
+    } else if (fn === OPS.restore) {
+      ctm = ctmStack.pop() || [1, 0, 0, 1, 0, 0];
+    } else if (fn === OPS.transform) {
+      ctm = concatMatrix(ctm, args);
+    } else if (fn === OPS.paintImageXObject) {
+      const name = args[0] as string;
+      // Skip duplicate images (same image used multiple times)
+      if (seenNames.has(name)) continue;
+      seenNames.add(name);
+
+      const imgW = Math.abs(ctm[0]);
+      const imgH = Math.abs(ctm[3]);
+      // Skip tiny images (icons, bullets, decorative dots)
+      if (imgW < 50 && imgH < 50) continue;
+
+      try {
+        const imgData = await getPageImage(page, name);
+        const dataUrl = renderImageToDataUrl(imgData);
+        if (dataUrl) {
+          images.push({
+            id: generateId(),
+            type: 'image',
+            content: '',
+            imageDataUrl: dataUrl,
+            isBold: false,
+            isItalic: false,
+            fontSize: 0,
+            pageIndex,
+          });
+        }
+      } catch {
+        // Skip images that can't be extracted
+      }
+    } else if (fn === OPS.paintInlineImageXObject) {
+      const imgW = Math.abs(ctm[0]);
+      const imgH = Math.abs(ctm[3]);
+      if (imgW < 50 && imgH < 50) continue;
+
+      try {
+        const dataUrl = renderImageToDataUrl(args[0]);
+        if (dataUrl) {
+          images.push({
+            id: generateId(),
+            type: 'image',
+            content: '',
+            imageDataUrl: dataUrl,
+            isBold: false,
+            isItalic: false,
+            fontSize: 0,
+            pageIndex,
+          });
+        }
+      } catch {
+        // Skip
+      }
+    }
+  }
+
+  return images;
+}
+
 interface ParseProgress {
   currentPage: number;
   totalPages: number;
@@ -303,21 +486,24 @@ export async function parsePdf(
     // Check for multi-column layout
     const columns = detectColumns(lines, viewport.width);
 
-    let blocks: PdfStructuredBlock[];
+    let textBlocks: PdfStructuredBlock[];
     if (columns) {
       // Process left column first, then right
       const leftBlocks = groupIntoBlocks(columns.left, pageIndex, medianFontSize);
       const rightBlocks = groupIntoBlocks(columns.right, pageIndex, medianFontSize);
-      blocks = [...leftBlocks, ...rightBlocks];
+      textBlocks = [...leftBlocks, ...rightBlocks];
     } else {
-      blocks = groupIntoBlocks(lines, pageIndex, medianFontSize);
+      textBlocks = groupIntoBlocks(lines, pageIndex, medianFontSize);
     }
+
+    // Extract images from the page
+    const imageBlocks = await extractPageImages(page, pdfjsLib, pageIndex);
 
     pages.push({
       pageIndex,
       width: viewport.width,
       height: viewport.height,
-      blocks,
+      blocks: [...textBlocks, ...imageBlocks],
     });
   }
 

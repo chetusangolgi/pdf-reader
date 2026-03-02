@@ -164,6 +164,23 @@ function BlockRenderer({ block, index, paragraphGap, highlights }: BlockRenderer
         </li>
       );
 
+    case 'image':
+      return block.imageDataUrl ? (
+        <figure
+          data-block-index={index}
+          data-page-index={block.pageIndex}
+          style={{ marginBottom: paragraphGap }}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={block.imageDataUrl}
+            alt=""
+            style={{ maxWidth: '100%', height: 'auto', borderRadius: '4px' }}
+            loading="lazy"
+          />
+        </figure>
+      ) : null;
+
     case 'page-break':
       return (
         <div

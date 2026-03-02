@@ -2,9 +2,10 @@ import type { PdfDocument, PdfStructuredBlock } from '@/types/pdf';
 
 export interface ReflowedBlock {
   id: string;
-  type: 'heading' | 'paragraph' | 'list-item' | 'table' | 'image-placeholder' | 'page-break';
+  type: 'heading' | 'paragraph' | 'list-item' | 'table' | 'image' | 'page-break';
   level?: number;
   content: string;
+  imageDataUrl?: string;
   isBold: boolean;
   isItalic: boolean;
   pageIndex: number;
@@ -42,7 +43,8 @@ function structuredBlockToReflowed(block: PdfStructuredBlock): ReflowedBlock {
     id: block.id,
     type: block.type,
     level: block.level,
-    content: cleanText(block.content),
+    content: block.type === 'image' ? '' : cleanText(block.content),
+    imageDataUrl: block.imageDataUrl,
     isBold: block.isBold,
     isItalic: block.isItalic,
     pageIndex: block.pageIndex,
