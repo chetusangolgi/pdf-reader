@@ -10,36 +10,131 @@ async function getPdfjs() {
   return pdfjsLib;
 }
 
-// Render a full PDF page to a canvas and return a data-URL image
+// --- Image extraction: render page, then crop individual image regions ---
+
+interface BlockWithY {
+  block: PdfStructuredBlock;
+  y: number; // PDF Y coordinate for ordering (higher = higher on page)
+}
+
+function concatMatrix(a: number[], b: number[]): number[] {
+  return [
+    a[0] * b[0] + a[1] * b[2],
+    a[0] * b[1] + a[1] * b[3],
+    a[2] * b[0] + a[3] * b[2],
+    a[2] * b[1] + a[3] * b[3],
+    a[4] * b[0] + a[5] * b[2] + b[4],
+    a[4] * b[1] + a[5] * b[3] + b[5],
+  ];
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function renderPageToImage(page: any, pageIndex: number): Promise<PdfStructuredBlock | null> {
-  try {
-    const scale = 2; // 2x for crisp rendering on retina displays
-    const viewport = page.getViewport({ scale });
+async function extractPageImages(page: any, pdfjsLib: any, pageIndex: number): Promise<BlockWithY[]> {
+  const ops = await page.getOperatorList();
+  const OPS = pdfjsLib.OPS;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    await page.render({ canvasContext: ctx, viewport }).promise;
-
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-
-    return {
-      id: generateId(),
-      type: 'image',
-      content: '',
-      imageDataUrl: dataUrl,
-      isBold: false,
-      isItalic: false,
-      fontSize: 0,
-      pageIndex,
-    };
-  } catch {
-    return null;
+  // Step 1: Walk operator list to find image positions via the transform matrix
+  interface ImageRegion {
+    corners: [number, number][];
+    pdfY: number;
   }
+
+  const regions: ImageRegion[] = [];
+  const stateStack: number[][] = [];
+  let ctm = [1, 0, 0, 1, 0, 0]; // identity
+
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i];
+    const args = ops.argsArray[i];
+
+    switch (fn) {
+      case OPS.save:
+        stateStack.push([...ctm]);
+        break;
+      case OPS.restore:
+        ctm = stateStack.pop() || [1, 0, 0, 1, 0, 0];
+        break;
+      case OPS.transform:
+        ctm = concatMatrix(ctm, args);
+        break;
+      case OPS.paintImageXObject:
+      case OPS.paintInlineImageXObject: {
+        // Images are painted in a 1×1 unit square; the CTM maps that to the page
+        const corners: [number, number][] = [
+          [ctm[4], ctm[5]],
+          [ctm[0] + ctm[4], ctm[1] + ctm[5]],
+          [ctm[0] + ctm[2] + ctm[4], ctm[1] + ctm[3] + ctm[5]],
+          [ctm[2] + ctm[4], ctm[3] + ctm[5]],
+        ];
+        const xs = corners.map((c) => c[0]);
+        const ys = corners.map((c) => c[1]);
+        const w = Math.max(...xs) - Math.min(...xs);
+        const h = Math.max(...ys) - Math.min(...ys);
+
+        // Skip tiny decorative images (icons, bullets, etc.)
+        if (w >= 30 && h >= 30) {
+          regions.push({ corners, pdfY: Math.max(...ys) });
+        }
+        break;
+      }
+    }
+  }
+
+  if (regions.length === 0) return [];
+
+  // Step 2: Render the full page to a canvas (only happens for pages WITH images)
+  const renderScale = 2;
+  const viewport = page.getViewport({ scale: renderScale });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return [];
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  // Step 3: Crop each image region from the rendered canvas
+  const results: BlockWithY[] = [];
+
+  for (const region of regions) {
+    // Convert PDF corners → canvas coords via the viewport transform
+    const vCorners = region.corners.map(([x, y]) =>
+      viewport.convertToViewportPoint(x, y)
+    );
+    const vxs = vCorners.map((c) => c[0]);
+    const vys = vCorners.map((c) => c[1]);
+
+    let cx = Math.max(0, Math.floor(Math.min(...vxs)));
+    let cy = Math.max(0, Math.floor(Math.min(...vys)));
+    let cw = Math.ceil(Math.max(...vxs)) - cx;
+    let ch = Math.ceil(Math.max(...vys)) - cy;
+
+    // Clamp to canvas bounds
+    cw = Math.min(cw, canvas.width - cx);
+    ch = Math.min(ch, canvas.height - cy);
+    if (cw <= 10 || ch <= 10) continue;
+
+    const crop = document.createElement('canvas');
+    crop.width = cw;
+    crop.height = ch;
+    const cropCtx = crop.getContext('2d')!;
+    cropCtx.drawImage(canvas, cx, cy, cw, ch, 0, 0, cw, ch);
+
+    results.push({
+      y: region.pdfY,
+      block: {
+        id: generateId(),
+        type: 'image',
+        content: '',
+        imageDataUrl: crop.toDataURL('image/png'),
+        isBold: false,
+        isItalic: false,
+        fontSize: 0,
+        pageIndex,
+      },
+    });
+  }
+
+  return results;
 }
 
 interface ParseProgress {
@@ -156,10 +251,10 @@ function linesToText(line: PdfTextItem[]): string {
   return line.map(item => item.text).join('');
 }
 
-function groupIntoBlocks(lines: PdfTextItem[][], pageIndex: number, medianFontSize: number): PdfStructuredBlock[] {
+function groupIntoBlocks(lines: PdfTextItem[][], pageIndex: number, medianFontSize: number): BlockWithY[] {
   if (lines.length === 0) return [];
 
-  const blocks: PdfStructuredBlock[] = [];
+  const blocks: BlockWithY[] = [];
   let currentBlockLines: PdfTextItem[][] = [lines[0]];
 
   for (let i = 1; i < lines.length; i++) {
@@ -198,57 +293,31 @@ function groupIntoBlocks(lines: PdfTextItem[][], pageIndex: number, medianFontSi
   return blocks;
 }
 
-function createBlock(lines: PdfTextItem[][], pageIndex: number, medianFontSize: number): PdfStructuredBlock {
+function createBlock(lines: PdfTextItem[][], pageIndex: number, medianFontSize: number): BlockWithY {
   const text = lines.map(linesToText).join(' ').replace(/\s+/g, ' ').trim();
   const fontSize = lines[0][0].fontSize;
   const isBold = lines[0][0].isBold;
   const isItalic = lines[0][0].isItalic;
+  const y = lines[0][0].y; // PDF Y of first line (for ordering)
 
   // Detect headings: significantly larger font than median, or bold + larger
   const isHeading = fontSize > medianFontSize * 1.2;
 
   if (isHeading) {
-    // Map font size ratio to heading level
     const ratio = fontSize / medianFontSize;
     let level = 3;
     if (ratio > 2.0) level = 1;
     else if (ratio > 1.5) level = 2;
     else if (ratio > 1.2) level = 3;
 
-    return {
-      id: generateId(),
-      type: 'heading',
-      level,
-      content: text,
-      isBold: true,
-      isItalic,
-      fontSize,
-      pageIndex,
-    };
+    return { y, block: { id: generateId(), type: 'heading', level, content: text, isBold: true, isItalic, fontSize, pageIndex } };
   }
 
-  // Check if it looks like a list item
   if (/^[\u2022\u2023\u25E6\u2043\u2219•●○◦-]\s/.test(text) || /^\d+[.)]\s/.test(text)) {
-    return {
-      id: generateId(),
-      type: 'list-item',
-      content: text,
-      isBold,
-      isItalic,
-      fontSize,
-      pageIndex,
-    };
+    return { y, block: { id: generateId(), type: 'list-item', content: text, isBold, isItalic, fontSize, pageIndex } };
   }
 
-  return {
-    id: generateId(),
-    type: 'paragraph',
-    content: text,
-    isBold,
-    isItalic,
-    fontSize,
-    pageIndex,
-  };
+  return { y, block: { id: generateId(), type: 'paragraph', content: text, isBold, isItalic, fontSize, pageIndex } };
 }
 
 function calculateMedianFontSize(items: PdfTextItem[]): number {
@@ -335,24 +404,27 @@ export async function parsePdf(
     // Check for multi-column layout
     const columns = detectColumns(lines, viewport.width);
 
-    let textBlocks: PdfStructuredBlock[];
+    let textBlocksWithY: BlockWithY[];
     if (columns) {
-      // Process left column first, then right
       const leftBlocks = groupIntoBlocks(columns.left, pageIndex, medianFontSize);
       const rightBlocks = groupIntoBlocks(columns.right, pageIndex, medianFontSize);
-      textBlocks = [...leftBlocks, ...rightBlocks];
+      textBlocksWithY = [...leftBlocks, ...rightBlocks];
     } else {
-      textBlocks = groupIntoBlocks(lines, pageIndex, medianFontSize);
+      textBlocksWithY = groupIntoBlocks(lines, pageIndex, medianFontSize);
     }
 
-    // Render full page as an image (captures all visuals: photos, diagrams, charts)
-    const pageImage = await renderPageToImage(page, pageIndex);
+    // Extract individual images and their positions
+    const imageBlocksWithY = await extractPageImages(page, pdfjsLib, pageIndex);
+
+    // Merge text + images, sort by Y descending (top of page first)
+    const allBlocks = [...textBlocksWithY, ...imageBlocksWithY];
+    allBlocks.sort((a, b) => b.y - a.y);
 
     pages.push({
       pageIndex,
       width: viewport.width,
       height: viewport.height,
-      blocks: [...(pageImage ? [pageImage] : []), ...textBlocks],
+      blocks: allBlocks.map((item) => item.block),
     });
   }
 
