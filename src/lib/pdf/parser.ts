@@ -10,132 +10,107 @@ async function getPdfjs() {
   return pdfjsLib;
 }
 
-// --- Image extraction: render page, then crop individual image regions ---
+// --- Unicode superscript / subscript mapping ---
+
+const SUPERSCRIPT_MAP: Record<string, string> = {
+  '0': '\u2070', '1': '\u00B9', '2': '\u00B2', '3': '\u00B3', '4': '\u2074',
+  '5': '\u2075', '6': '\u2076', '7': '\u2077', '8': '\u2078', '9': '\u2079',
+  '+': '\u207A', '-': '\u207B', '=': '\u207C', '(': '\u207D', ')': '\u207E',
+  'n': '\u207F', 'i': '\u2071',
+  'a': '\u1D43', 'b': '\u1D47', 'c': '\u1D9C', 'd': '\u1D48', 'e': '\u1D49',
+  'f': '\u1DA0', 'g': '\u1D4D', 'h': '\u02B0', 'j': '\u02B2', 'k': '\u1D4F',
+  'l': '\u02E1', 'm': '\u1D50', 'o': '\u1D52', 'p': '\u1D56', 'r': '\u02B3',
+  's': '\u02E2', 't': '\u1D57', 'u': '\u1D58', 'v': '\u1D5B', 'w': '\u02B7',
+  'x': '\u02E3', 'y': '\u02B8', 'z': '\u1DBB',
+  'A': '\u1D2C', 'B': '\u1D2E', 'D': '\u1D30', 'E': '\u1D31', 'G': '\u1D33',
+  'H': '\u1D34', 'I': '\u1D35', 'J': '\u1D36', 'K': '\u1D37', 'L': '\u1D38',
+  'M': '\u1D39', 'N': '\u1D3A', 'O': '\u1D3C', 'P': '\u1D3E', 'R': '\u1D3F',
+  'T': '\u1D40', 'U': '\u1D41', 'V': '\u2C7D', 'W': '\u1D42',
+};
+
+const SUBSCRIPT_MAP: Record<string, string> = {
+  '0': '\u2080', '1': '\u2081', '2': '\u2082', '3': '\u2083', '4': '\u2084',
+  '5': '\u2085', '6': '\u2086', '7': '\u2087', '8': '\u2088', '9': '\u2089',
+  '+': '\u208A', '-': '\u208B', '=': '\u208C', '(': '\u208D', ')': '\u208E',
+  'a': '\u2090', 'e': '\u2091', 'h': '\u2095', 'i': '\u1D62', 'j': '\u2C7C',
+  'k': '\u2096', 'l': '\u2097', 'm': '\u2098', 'n': '\u2099', 'o': '\u2092',
+  'p': '\u209A', 'r': '\u1D63', 's': '\u209B', 't': '\u209C', 'u': '\u1D64',
+  'v': '\u1D65', 'x': '\u2093',
+};
+
+function toUnicodeSuperscript(text: string): string {
+  let result = '';
+  for (const ch of text) {
+    result += SUPERSCRIPT_MAP[ch] ?? ch;
+  }
+  return result;
+}
+
+function toUnicodeSubscript(text: string): string {
+  let result = '';
+  for (const ch of text) {
+    result += SUBSCRIPT_MAP[ch] ?? ch;
+  }
+  return result;
+}
+
+// --- Image extraction ---
 
 interface BlockWithY {
   block: PdfStructuredBlock;
   y: number; // PDF Y coordinate for ordering (higher = higher on page)
 }
 
-function concatMatrix(a: number[], b: number[]): number[] {
-  return [
-    a[0] * b[0] + a[1] * b[2],
-    a[0] * b[1] + a[1] * b[3],
-    a[2] * b[0] + a[3] * b[2],
-    a[2] * b[1] + a[3] * b[3],
-    a[4] * b[0] + a[5] * b[2] + b[4],
-    a[4] * b[1] + a[5] * b[3] + b[5],
-  ];
-}
+// Numeric OPS codes for every image-paint operator in pdf.js v5.
+const IMAGE_OPS = new Set([
+  83, // paintImageMaskXObject
+  84, // paintImageMaskXObjectGroup
+  85, // paintImageXObject
+  86, // paintInlineImageXObject
+  87, // paintInlineImageXObjectGroup
+  88, // paintImageXObjectRepeat
+  89, // paintImageMaskXObjectRepeat
+  90, // paintSolidColorImageMask
+]);
 
+/**
+ * Detect whether a page has image operators.
+ * Does NOT render — rendering happens lazily in the component to avoid
+ * pdf.js internal state conflicts when rendering multiple pages during parse.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function extractPageImages(page: any, pdfjsLib: any, pageIndex: number): Promise<BlockWithY[]> {
-  const ops = await page.getOperatorList();
-  const OPS = pdfjsLib.OPS;
-
-  // Step 1: Walk operator list to find image positions via the transform matrix
-  interface ImageRegion {
-    corners: [number, number][];
-    pdfY: number;
+async function extractPageImages(page: any, _pdfjsLib: any, pageIndex: number): Promise<BlockWithY[]> {
+  let ops;
+  try {
+    ops = await page.getOperatorList();
+  } catch {
+    return [];
   }
 
-  const regions: ImageRegion[] = [];
-  const stateStack: number[][] = [];
-  let ctm = [1, 0, 0, 1, 0, 0]; // identity
-
   for (let i = 0; i < ops.fnArray.length; i++) {
-    const fn = ops.fnArray[i];
-    const args = ops.argsArray[i];
-
-    switch (fn) {
-      case OPS.save:
-        stateStack.push([...ctm]);
-        break;
-      case OPS.restore:
-        ctm = stateStack.pop() || [1, 0, 0, 1, 0, 0];
-        break;
-      case OPS.transform:
-        ctm = concatMatrix(ctm, args);
-        break;
-      case OPS.paintImageXObject:
-      case OPS.paintInlineImageXObject: {
-        // Images are painted in a 1×1 unit square; the CTM maps that to the page
-        const corners: [number, number][] = [
-          [ctm[4], ctm[5]],
-          [ctm[0] + ctm[4], ctm[1] + ctm[5]],
-          [ctm[0] + ctm[2] + ctm[4], ctm[1] + ctm[3] + ctm[5]],
-          [ctm[2] + ctm[4], ctm[3] + ctm[5]],
-        ];
-        const xs = corners.map((c) => c[0]);
-        const ys = corners.map((c) => c[1]);
-        const w = Math.max(...xs) - Math.min(...xs);
-        const h = Math.max(...ys) - Math.min(...ys);
-
-        // Skip tiny decorative images (icons, bullets, etc.)
-        if (w >= 30 && h >= 30) {
-          regions.push({ corners, pdfY: Math.max(...ys) });
-        }
-        break;
-      }
+    if (IMAGE_OPS.has(ops.fnArray[i])) {
+      // Page has images — return a placeholder block.
+      // The actual render is deferred to the <PageImage> component.
+      return [{
+        y: Infinity,
+        block: {
+          id: generateId(),
+          type: 'image',
+          content: '',
+          imageDataUrl: `__render_page__`,
+          isBold: false,
+          isItalic: false,
+          fontSize: 0,
+          pageIndex,
+        },
+      }];
     }
   }
 
-  if (regions.length === 0) return [];
-
-  // Step 2: Render the full page to a canvas (only happens for pages WITH images)
-  const renderScale = 2;
-  const viewport = page.getViewport({ scale: renderScale });
-  const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return [];
-  await page.render({ canvasContext: ctx, viewport }).promise;
-
-  // Step 3: Crop each image region from the rendered canvas
-  const results: BlockWithY[] = [];
-
-  for (const region of regions) {
-    // Convert PDF corners → canvas coords via the viewport transform
-    const vCorners = region.corners.map(([x, y]) =>
-      viewport.convertToViewportPoint(x, y)
-    );
-    const vxs = vCorners.map((c) => c[0]);
-    const vys = vCorners.map((c) => c[1]);
-
-    let cx = Math.max(0, Math.floor(Math.min(...vxs)));
-    let cy = Math.max(0, Math.floor(Math.min(...vys)));
-    let cw = Math.ceil(Math.max(...vxs)) - cx;
-    let ch = Math.ceil(Math.max(...vys)) - cy;
-
-    // Clamp to canvas bounds
-    cw = Math.min(cw, canvas.width - cx);
-    ch = Math.min(ch, canvas.height - cy);
-    if (cw <= 10 || ch <= 10) continue;
-
-    const crop = document.createElement('canvas');
-    crop.width = cw;
-    crop.height = ch;
-    const cropCtx = crop.getContext('2d')!;
-    cropCtx.drawImage(canvas, cx, cy, cw, ch, 0, 0, cw, ch);
-
-    results.push({
-      y: region.pdfY,
-      block: {
-        id: generateId(),
-        type: 'image',
-        content: '',
-        imageDataUrl: crop.toDataURL('image/png'),
-        isBold: false,
-        isItalic: false,
-        fontSize: 0,
-        pageIndex,
-      },
-    });
-  }
-
-  return results;
+  return [];
 }
+
+// --- Text extraction with superscript/subscript detection ---
 
 interface ParseProgress {
   currentPage: number;
@@ -212,6 +187,113 @@ function groupIntoLines(items: PdfTextItem[]): PdfTextItem[][] {
   return lines;
 }
 
+/**
+ * Merge isolated super/subscript lines into their adjacent baseline lines.
+ * A line is a super/subscript candidate if it has fewer items, a smaller average
+ * font size, overlaps in X range, and is close in Y to an adjacent line.
+ */
+function mergeSupSubLines(lines: PdfTextItem[][]): PdfTextItem[][] {
+  if (lines.length <= 1) return lines;
+
+  const result: PdfTextItem[][] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const prevLine = result.length > 0 ? result[result.length - 1] : null;
+
+    if (prevLine && isSupSubCandidate(line, prevLine)) {
+      // Merge this line into the previous one
+      prevLine.push(...line);
+      prevLine.sort((a, b) => a.x - b.x);
+      continue;
+    }
+
+    if (prevLine && isSupSubCandidate(prevLine, line)) {
+      // Previous line was a sup/sub of this one — merge
+      line.push(...prevLine);
+      line.sort((a, b) => a.x - b.x);
+      result[result.length - 1] = line;
+      continue;
+    }
+
+    result.push(line);
+  }
+
+  return result;
+}
+
+function isSupSubCandidate(candidate: PdfTextItem[], baseline: PdfTextItem[]): boolean {
+  if (candidate.length > baseline.length * 0.6) return false;
+
+  const candAvg = candidate.reduce((s, t) => s + t.fontSize, 0) / candidate.length;
+  const baseAvg = baseline.reduce((s, t) => s + t.fontSize, 0) / baseline.length;
+
+  // Super/subscripts have a noticeably smaller font
+  if (candAvg > baseAvg * 0.9) return false;
+
+  // Y distance must be within ~60% of the baseline font size
+  const candY = candidate[0].y;
+  const baseY = baseline[0].y;
+  if (Math.abs(candY - baseY) > baseAvg * 0.6) return false;
+
+  // X ranges must overlap
+  const candMinX = Math.min(...candidate.map(t => t.x));
+  const candMaxX = Math.max(...candidate.map(t => t.x + t.width));
+  const baseMinX = Math.min(...baseline.map(t => t.x));
+  const baseMaxX = Math.max(...baseline.map(t => t.x + t.width));
+
+  return candMaxX > baseMinX && candMinX < baseMaxX;
+}
+
+/**
+ * Convert a line of text items to a string, detecting superscripts and subscripts
+ * based on font size and Y-position relative to the line's dominant baseline,
+ * and converting them to Unicode superscript/subscript characters.
+ */
+function lineItemsToRichText(lineItems: PdfTextItem[]): string {
+  if (lineItems.length === 0) return '';
+  if (lineItems.length === 1) return lineItems[0].text;
+
+  // Find dominant font size (most common size, with tolerance)
+  const sizeGroups: { size: number; count: number }[] = [];
+  for (const item of lineItems) {
+    const existing = sizeGroups.find(g => Math.abs(g.size - item.fontSize) < 1);
+    if (existing) {
+      existing.count++;
+    } else {
+      sizeGroups.push({ size: item.fontSize, count: 1 });
+    }
+  }
+  sizeGroups.sort((a, b) => b.count - a.count);
+  const dominantSize = sizeGroups[0].size;
+
+  // Find baseline Y from items at the dominant size
+  const baselineItems = lineItems.filter(i => Math.abs(i.fontSize - dominantSize) < 1.5);
+  if (baselineItems.length === 0) {
+    return lineItems.map(i => i.text).join('');
+  }
+
+  const baselineY = baselineItems.reduce((s, i) => s + i.y, 0) / baselineItems.length;
+
+  let result = '';
+  for (const item of lineItems) {
+    const isSmallerFont = item.fontSize < dominantSize * 0.85;
+    const yOffset = item.y - baselineY; // positive = higher on page (PDF Y goes up)
+
+    if (isSmallerFont && yOffset > dominantSize * 0.12) {
+      // Higher Y + smaller font = superscript
+      result += toUnicodeSuperscript(item.text);
+    } else if (isSmallerFont && yOffset < -dominantSize * 0.12) {
+      // Lower Y + smaller font = subscript
+      result += toUnicodeSubscript(item.text);
+    } else {
+      result += item.text;
+    }
+  }
+
+  return result;
+}
+
 function detectColumns(lines: PdfTextItem[][], pageWidth: number): { left: PdfTextItem[][]; right: PdfTextItem[][] } | null {
   if (lines.length < 4) return null;
 
@@ -247,19 +329,18 @@ function detectColumns(lines: PdfTextItem[][], pageWidth: number): { left: PdfTe
   return { left, right };
 }
 
-function linesToText(line: PdfTextItem[]): string {
-  return line.map(item => item.text).join('');
-}
-
 function groupIntoBlocks(lines: PdfTextItem[][], pageIndex: number, medianFontSize: number): BlockWithY[] {
   if (lines.length === 0) return [];
 
-  const blocks: BlockWithY[] = [];
-  let currentBlockLines: PdfTextItem[][] = [lines[0]];
+  // Merge isolated superscript/subscript lines with their neighbours
+  const merged = mergeSupSubLines(lines);
 
-  for (let i = 1; i < lines.length; i++) {
-    const prevLine = lines[i - 1];
-    const currLine = lines[i];
+  const blocks: BlockWithY[] = [];
+  let currentBlockLines: PdfTextItem[][] = [merged[0]];
+
+  for (let i = 1; i < merged.length; i++) {
+    const prevLine = merged[i - 1];
+    const currLine = merged[i];
 
     const prevY = prevLine[0].y;
     const currY = currLine[0].y;
@@ -294,7 +375,8 @@ function groupIntoBlocks(lines: PdfTextItem[][], pageIndex: number, medianFontSi
 }
 
 function createBlock(lines: PdfTextItem[][], pageIndex: number, medianFontSize: number): BlockWithY {
-  const text = lines.map(linesToText).join(' ').replace(/\s+/g, ' ').trim();
+  // Use rich text conversion (with superscript/subscript detection) for each line
+  const text = lines.map(lineItemsToRichText).join(' ').replace(/\s+/g, ' ').trim();
   const fontSize = lines[0][0].fontSize;
   const isBold = lines[0][0].isBold;
   const isItalic = lines[0][0].isItalic;

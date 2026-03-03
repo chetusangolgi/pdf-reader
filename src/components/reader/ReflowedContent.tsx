@@ -1,11 +1,12 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import type { ReflowedBlock } from '@/lib/pdf/reflow';
 import type { Highlight } from '@/types/annotation';
 import { useTypographyStore } from '@/stores/typographyStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
+import { useReaderStore } from '@/stores/readerStore';
 
 interface ReflowedContentProps {
   blocks: ReflowedBlock[];
@@ -121,6 +122,101 @@ function renderHighlightedText(text: string, blockIndex: number, highlights: Hig
   return nodes;
 }
 
+// ---------------------------------------------------------------------------
+// Lazy page-image renderer.
+// Each instance opens its OWN pdf.js document so there is zero shared state
+// and zero chance of render conflicts between pages.
+// ---------------------------------------------------------------------------
+
+function PageImage({ pageIndex, paragraphGap }: { pageIndex: number; paragraphGap: string }) {
+  const file = useReaderStore((s) => s.file);
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!file) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const pdfjsLib = await import('pdfjs-dist');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+          'pdfjs-dist/build/pdf.worker.min.mjs',
+          import.meta.url
+        ).toString();
+
+        // Use a COPY of the buffer — pdf.js detaches it
+        const pdf = await pdfjsLib.getDocument({ data: file.slice(0) }).promise;
+        const page = await pdf.getPage(pageIndex + 1);
+        const scale = 2;
+        const viewport = page.getViewport({ scale });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d')!;
+
+        await page.render({ canvasContext: ctx, canvas, viewport }).promise;
+
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+        // Release canvas GPU memory immediately
+        canvas.width = 0;
+        canvas.height = 0;
+        page.cleanup();
+        await pdf.destroy();
+
+        if (!cancelled && mounted.current) {
+          setSrc(dataUrl);
+        }
+      } catch (e) {
+        console.warn(`[pdf-reader] Failed to render page ${pageIndex} image:`, e);
+        if (!cancelled && mounted.current) setFailed(true);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [file, pageIndex]);
+
+  if (failed) return null;
+
+  if (!src) {
+    return (
+      <div
+        style={{
+          marginBottom: paragraphGap,
+          textAlign: 'center',
+          padding: '3rem 1rem',
+          opacity: 0.4,
+          fontSize: '0.85rem',
+        }}
+      >
+        Rendering page {pageIndex + 1}…
+      </div>
+    );
+  }
+
+  return (
+    <figure style={{ marginBottom: paragraphGap, textAlign: 'center' }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={`Page ${pageIndex + 1}`}
+        style={{ width: '100%', height: 'auto', borderRadius: '4px' }}
+      />
+    </figure>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
 function BlockRenderer({ block, index, paragraphGap, highlights }: BlockRendererProps) {
   const style: React.CSSProperties = {
     marginBottom: block.type === 'paragraph' || block.type === 'list-item' ? paragraphGap : undefined,
@@ -165,18 +261,22 @@ function BlockRenderer({ block, index, paragraphGap, highlights }: BlockRenderer
       );
 
     case 'image':
+      // Deferred page render — the parser only detected images, didn't render
+      if (block.imageDataUrl === '__render_page__') {
+        return <PageImage pageIndex={block.pageIndex} paragraphGap={paragraphGap} />;
+      }
+      // Pre-rendered data URL (legacy path)
       return block.imageDataUrl ? (
         <figure
           data-block-index={index}
           data-page-index={block.pageIndex}
-          style={{ marginBottom: paragraphGap }}
+          style={{ marginBottom: paragraphGap, textAlign: 'center' }}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={block.imageDataUrl}
             alt=""
-            style={{ maxWidth: '100%', height: 'auto', borderRadius: '4px' }}
-            loading="lazy"
+            style={{ width: '100%', height: 'auto', borderRadius: '4px' }}
           />
         </figure>
       ) : null;
